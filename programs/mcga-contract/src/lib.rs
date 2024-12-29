@@ -16,14 +16,32 @@ pub mod mcga_pool {
         Ok(())
     }
 
-    pub fn deposit_with_hash(ctx: Context<Deposit>, amount: u64, attempt_hash: String) -> Result<()> {
+    // First step: Just deposit tokens
+    pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
+        let transfer_to_pool = Transfer {
+            from: ctx.accounts.user_token_account.to_account_info(),
+            to: ctx.accounts.pool_token_account.to_account_info(),
+            authority: ctx.accounts.user.to_account_info(),
+        };
+
+        let cpi_ctx_to_pool = CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            transfer_to_pool,
+        );
+
+        token::transfer(cpi_ctx_to_pool, amount)?;
+        Ok(())
+    }
+
+    // Second step: Check hash and potentially win pool
+    pub fn check_hash(ctx: Context<Deposit>, attempt_hash: String) -> Result<()> {
         let pool = &ctx.accounts.pool;
 
+        // Only transfer if hash matches
         if attempt_hash == pool.secret_hash {
-            // Correct hash - transfer all tokens from pool to user
             let pool_balance = ctx.accounts.pool_token_account.amount;
 
-            let transfer_instruction = Transfer {
+            let transfer_to_user = Transfer {
                 from: ctx.accounts.pool_token_account.to_account_info(),
                 to: ctx.accounts.user_token_account.to_account_info(),
                 authority: ctx.accounts.pool.to_account_info(),
@@ -35,27 +53,13 @@ pub mod mcga_pool {
             ];
             let signer = &[&seeds[..]];
 
-            let cpi_ctx = CpiContext::new_with_signer(
+            let cpi_ctx_to_user = CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
-                transfer_instruction,
+                transfer_to_user,
                 signer,
             );
 
-            token::transfer(cpi_ctx, pool_balance)?;
-        } else {
-            // Wrong hash - transfer user tokens to pool
-            let transfer_instruction = Transfer {
-                from: ctx.accounts.user_token_account.to_account_info(),
-                to: ctx.accounts.pool_token_account.to_account_info(),
-                authority: ctx.accounts.user.to_account_info(),
-            };
-
-            let cpi_ctx = CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                transfer_instruction,
-            );
-
-            token::transfer(cpi_ctx, amount)?;
+            token::transfer(cpi_ctx_to_user, pool_balance)?;
         }
 
         Ok(())
@@ -68,7 +72,7 @@ pub struct InitializePool<'info> {
     #[account(
         init,
         payer = authority,
-        space = 8 + 32 + 32 + 64 + 64 + 8, // Added space for seed
+        space = 8 + 32 + 32 + 64 + 64 + 8,
         seeds = [seed.as_bytes()],
         bump
     )]
