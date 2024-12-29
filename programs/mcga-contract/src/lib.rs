@@ -1,6 +1,5 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
-use sha2::{Sha256, Digest};
 
 declare_id!("DNsprXHccVbxFTE2RNvchU3E3W1Hn3U4yosFSiVs8bQT");
 
@@ -8,25 +7,21 @@ declare_id!("DNsprXHccVbxFTE2RNvchU3E3W1Hn3U4yosFSiVs8bQT");
 pub mod mcga_pool {
     use super::*;
 
-    // The secret hash for the prize (in practice, this would be set during initialization)
-    const SECRET_HASH: &str = "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"; // This is the hash of "password"
-
-    pub fn initialize_pool(ctx: Context<InitializePool>) -> Result<()> {
+    pub fn initialize_pool(ctx: Context<InitializePool>, seed: String, secret_hash: String) -> Result<()> {
         let pool = &mut ctx.accounts.pool;
         pool.authority = ctx.accounts.authority.key();
         pool.token_account = ctx.accounts.pool_token_account.key();
+        pool.secret_hash = secret_hash;
+        pool.seed = seed;
         Ok(())
     }
 
-    pub fn deposit_with_secret(ctx: Context<Deposit>, amount: u64, secret: String) -> Result<()> {
-        // Hash the provided secret
-        let mut hasher = Sha256::new();
-        hasher.update(secret.as_bytes());
-        let result = format!("{:x}", hasher.finalize());
+    pub fn deposit_with_hash(ctx: Context<Deposit>, amount: u64, attempt_hash: String) -> Result<()> {
+        let pool = &ctx.accounts.pool;
 
-        if result == SECRET_HASH {
-            // Secret matches - transfer all pool tokens to the user
-            let pool_amount = ctx.accounts.pool_token_account.amount;
+        if attempt_hash == pool.secret_hash {
+            // Correct hash - transfer all tokens from pool to user
+            let pool_balance = ctx.accounts.pool_token_account.amount;
 
             let transfer_instruction = Transfer {
                 from: ctx.accounts.pool_token_account.to_account_info(),
@@ -35,21 +30,20 @@ pub mod mcga_pool {
             };
 
             let seeds = &[
-                b"pool".as_ref(),
-                &[ctx.accounts.pool.bump],
+                pool.seed.as_bytes(),
+                &[ctx.bumps.pool],
             ];
-
-            let signer_seeds = &[&seeds[..]];
+            let signer = &[&seeds[..]];
 
             let cpi_ctx = CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 transfer_instruction,
-                signer_seeds,
+                signer,
             );
 
-            token::transfer(cpi_ctx, pool_amount)?;
+            token::transfer(cpi_ctx, pool_balance)?;
         } else {
-            // Wrong secret - transfer user tokens to pool
+            // Wrong hash - transfer user tokens to pool
             let transfer_instruction = Transfer {
                 from: ctx.accounts.user_token_account.to_account_info(),
                 to: ctx.accounts.pool_token_account.to_account_info(),
@@ -69,12 +63,13 @@ pub mod mcga_pool {
 }
 
 #[derive(Accounts)]
+#[instruction(seed: String, secret_hash: String)]
 pub struct InitializePool<'info> {
     #[account(
         init,
         payer = authority,
-        space = 8 + 32 + 32 + 1, // Added 1 for bump
-        seeds = [b"pool"],
+        space = 8 + 32 + 32 + 64 + 64 + 8, // Added space for seed
+        seeds = [seed.as_bytes()],
         bump
     )]
     pub pool: Account<'info, Pool>,
@@ -97,11 +92,14 @@ pub struct InitializePool<'info> {
 pub struct Deposit<'info> {
     #[account(
         mut,
-        seeds = [b"pool"],
-        bump,
+        seeds = [pool.seed.as_bytes()],
+        bump
     )]
     pub pool: Account<'info, Pool>,
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = pool_token_account.key() == pool.token_account
+    )]
     pub pool_token_account: Account<'info, TokenAccount>,
     #[account(mut)]
     pub user_token_account: Account<'info, TokenAccount>,
@@ -113,5 +111,6 @@ pub struct Deposit<'info> {
 pub struct Pool {
     pub authority: Pubkey,
     pub token_account: Pubkey,
-    pub bump: u8,
+    pub secret_hash: String,
+    pub seed: String,
 }
